@@ -80,6 +80,7 @@
     <input type="range" id="lensAperture" min="10" max="80" value="30">
     <div class="value" id="lensApertureVal">30</div>
   </div>
+  <button id="showCutout" style="padding:8px 16px; background:#e94560; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; align-self:center;">Show Cutout</button>
 </div>
 
 <div class="dims" id="dims"></div>
@@ -881,6 +882,219 @@ function draw() {
 
 window.addEventListener('resize', draw);
 draw();
+
+document.getElementById('showCutout').addEventListener('click', () => {
+  const p = getParams();
+  const alpha = p.incAngleDeg * Math.PI / 180;
+  const slitX_mm = -p.slitDist * Math.cos(alpha);
+  const slitY_mm = -p.slitDist * Math.sin(alpha);
+
+  const step = 5;
+  const rays = [];
+  for (let lam = p.lambdaMin; lam <= p.lambdaMax; lam += step) {
+    const beta = diffractionAngle(lam, p.N, p.incAngleDeg, p.m);
+    if (beta !== null) rays.push({ nm: lam, beta });
+  }
+  if (rays.length < 2) return;
+
+  const centralBeta = diffractionAngle((p.lambdaMin + p.lambdaMax) / 2, p.N, p.incAngleDeg, p.m);
+  const scX = p.sensorDist * Math.cos(centralBeta);
+  const scY = p.sensorDist * Math.sin(centralBeta);
+  const stX = -Math.sin(centralBeta), stY = Math.cos(centralBeta);
+
+  const hits = [];
+  rays.forEach(({nm, beta}) => {
+    const rdx = Math.cos(beta), rdy = Math.sin(beta);
+    const det = rdx * stY - rdy * stX;
+    if (Math.abs(det) < 1e-10) return;
+    const t = (scX * stY - scY * stX) / det;
+    const s = (scX * rdy - scY * rdx) / det;
+    hits.push({ nm, beta, x: rdx * t, y: rdy * t, s, t });
+  });
+  if (hits.length < 2) return;
+
+  const sMinS = Math.min(...hits.map(h => h.s));
+  const sMaxS = Math.max(...hits.map(h => h.s));
+  const sm = 3;
+  const s1x = scX + stX * (sMinS - sm), s1y = scY + stY * (sMinS - sm);
+  const s2x = scX + stX * (sMaxS + sm), s2y = scY + stY * (sMaxS + sm);
+
+  const grBot = -p.gratingHeight / 2;
+  const allX = [0, s1x, s2x, ...hits.map(h=>h.x)];
+  const allY = [slitY_mm, grBot, p.gratingHeight / 2, s1y, s2y, ...hits.map(h=>h.y)];
+  const wp = 10;
+  const bMinX = slitX_mm;
+  const bMaxX = Math.max(...allX) + wp + p.boxExtra;
+  const bMinY = grBot - p.gratingGap;
+  const bMaxY = Math.max(...allY) + wp;
+  const bW = bMaxX - bMinX, bH = bMaxY - bMinY;
+
+  const cdx = Math.cos(centralBeta), cdy = Math.sin(centralBeta);
+  const lpx = -Math.sin(centralBeta), lpy = Math.cos(centralBeta);
+  const lR = p.lensBodyDiam / 2;
+
+  let tWall = Infinity;
+  if (cdx > 0) tWall = Math.min(tWall, (bMaxX - scX) / cdx);
+  if (cdx < 0) tWall = Math.min(tWall, (bMinX - scX) / cdx);
+  if (cdy > 0) tWall = Math.min(tWall, (bMaxY - scY) / cdy);
+  if (cdy < 0) tWall = Math.min(tWall, (bMinY - scY) / cdy);
+  const barrelLen = Math.max(20, tWall + 10);
+  const lBack = { x: scX, y: scY };
+
+  function wallCut(ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const vx0 = ax - lBack.x, vy0 = ay - lBack.y;
+    const a0 = vx0 * cdx + vy0 * cdy, da = dx * cdx + dy * cdy;
+    const p0 = vx0 * lpx + vy0 * lpy, dp = dx * lpx + dy * lpy;
+    let tMin = 0, tMax = 1;
+    function clip(c0, dc, lo, hi) {
+      if (Math.abs(dc) < 1e-10) { if (c0 < lo || c0 > hi) { tMin = 1; tMax = 0; } return; }
+      let t1 = (lo - c0) / dc, t2 = (hi - c0) / dc;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      tMin = Math.max(tMin, t1); tMax = Math.min(tMax, t2);
+    }
+    clip(a0, da, 0, barrelLen);
+    clip(p0, dp, -lR, lR);
+    if (tMin >= tMax) return null;
+    return { from: tMin, to: tMax, len: Math.sqrt((dx*(tMax-tMin))**2 + (dy*(tMax-tMin))**2) };
+  }
+
+  // Compute cuts on each wall (parametric: 0=start, 1=end of wall)
+  const walls = [
+    { name: 'Bottom', len: bW, cut: wallCut(bMinX, bMinY, bMaxX, bMinY) },
+    { name: 'Right',  len: bH, cut: wallCut(bMaxX, bMinY, bMaxX, bMaxY) },
+    { name: 'Top',    len: bW, cut: wallCut(bMaxX, bMaxY, bMinX, bMaxY) },
+    { name: 'Left',   len: bH, cut: wallCut(bMinX, bMaxY, bMinX, bMinY) },
+  ];
+
+  // Slit position on left wall (left wall goes from top-left to bottom-left)
+  // Left wall: from (bMinX, bMaxY) to (bMinX, bMinY), so t=0 is top, t=1 is bottom
+  const slitT = (bMaxY - slitY_mm) / bH;
+
+  // Grating on bottom wall: bottom goes from (bMinX, bMinY) to (bMaxX, bMinY)
+  const gratingT = (0 - bMinX) / bW; // grating X=0
+
+  // Build SVG: unfolded box — 4 walls laid out in a strip, scales to fit window
+  const pad = 40;
+  const wallDepth = 60; // box depth in mm
+  const totalW = 2 * (bW + bH);
+  const svgW = totalW + 2 * pad;
+  const svgH = wallDepth + 2 * pad + 70;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 ${svgW} ${svgH}" preserveAspectRatio="xMidYMid meet">`;
+  svg += `<rect width="100%" height="100%" fill="white"/>`;
+  svg += `<text x="${svgW/2}" y="16" text-anchor="middle" font-size="8" font-family="Arial" font-weight="bold">Spectrometer Box Cutout — unfold and cut</text>`;
+  svg += `<text x="${svgW/2}" y="26" text-anchor="middle" font-size="5" font-family="Arial" fill="#666">Box: ${bW.toFixed(0)}x${bH.toFixed(0)}mm | Grating: ${p.N} l/mm | ${p.lambdaMin}-${p.lambdaMax}nm</text>`;
+
+  const y0 = pad;
+  let x = pad;
+  const dH = wallDepth;
+  const arrH = 2.5; // arrowhead half-width
+  const arrL = 1.5; // arrowhead length
+
+  // SVG dimension arrow helper: horizontal arrow with label, at given y
+  function dimArrow(x1, x2, y, label, color, above) {
+    if (Math.abs(x2 - x1) < 0.5) return '';
+    const dir = above ? -1 : 1;
+    const ty = y + dir * 5;
+    const ay = y;
+    let s = '';
+    // line
+    s += `<line x1="${x1}" y1="${ay}" x2="${x2}" y2="${ay}" stroke="${color}" stroke-width="0.3"/>`;
+    // left arrowhead
+    s += `<polygon points="${x1},${ay} ${x1+arrL},${ay-arrH} ${x1+arrL},${ay+arrH}" fill="${color}"/>`;
+    // right arrowhead
+    s += `<polygon points="${x2},${ay} ${x2-arrL},${ay-arrH} ${x2-arrL},${ay+arrH}" fill="${color}"/>`;
+    // label
+    s += `<text x="${(x1+x2)/2}" y="${ty}" text-anchor="middle" font-size="3.5" font-family="Arial" fill="${color}">${label}</text>`;
+    return s;
+  }
+
+  walls.forEach((w, i) => {
+    const wMm = w.len;
+
+    // Wall rectangle
+    svg += `<rect x="${x}" y="${y0}" width="${wMm}" height="${dH}" fill="none" stroke="black" stroke-width="0.5"/>`;
+
+    // Wall label
+    svg += `<text x="${x + wMm/2}" y="${y0 - 8}" text-anchor="middle" font-size="5" font-family="Arial" font-weight="bold">${w.name}</text>`;
+
+    // Fold line (dashed) between walls
+    if (i > 0) {
+      svg += `<line x1="${x}" y1="${y0 - 2}" x2="${x}" y2="${y0 + dH + 2}" stroke="#aaa" stroke-width="0.3" stroke-dasharray="2,1.5"/>`;
+    }
+
+    // Full wall dimension arrow above
+    svg += dimArrow(x, x + wMm, y0 - 3, `${wMm.toFixed(0)}mm`, '#333', true);
+
+    // Lens cut (red rectangle on wall)
+    if (w.cut) {
+      const cx1 = x + w.cut.from * wMm;
+      const cx2 = x + w.cut.to * wMm;
+      svg += `<rect x="${cx1}" y="${y0}" width="${cx2 - cx1}" height="${dH}" fill="rgba(255,100,0,0.2)" stroke="#ff6600" stroke-width="0.7"/>`;
+      svg += `<text x="${(cx1+cx2)/2}" y="${y0 + dH/2 + 1.5}" text-anchor="middle" font-size="3.5" font-family="Arial" fill="#ff6600" font-weight="bold">LENS CUT</text>`;
+      // Dimension arrows: left edge to cut start, cut width, cut end to right edge
+      const dimY = y0 + dH + 8;
+      if (w.cut.from > 0.02) {
+        svg += dimArrow(x, cx1, dimY, `${(w.cut.from * wMm).toFixed(0)}`, '#ff6600', false);
+      }
+      svg += dimArrow(cx1, cx2, dimY + 7, `${w.cut.len.toFixed(0)}mm`, '#ff6600', false);
+      if (w.cut.to < 0.98) {
+        svg += dimArrow(cx2, x + wMm, dimY, `${((1 - w.cut.to) * wMm).toFixed(0)}`, '#ff6600', false);
+      }
+    }
+
+    // Slit on left wall
+    if (w.name === 'Left') {
+      const slitPos = slitT * wMm;
+      const slitW = 2;
+      svg += `<rect x="${x + slitPos - slitW/2}" y="${y0}" width="${slitW}" height="${dH}" fill="rgba(255,255,0,0.3)" stroke="#cc0" stroke-width="0.7"/>`;
+      svg += `<text x="${x + slitPos}" y="${y0 + dH/2 + 1.5}" text-anchor="middle" font-size="3.5" font-family="Arial" fill="#aa8800" font-weight="bold">SLIT</text>`;
+      // Dimension: left edge to slit, slit to right edge
+      const dimY = y0 + dH + 8;
+      if (slitPos > 2) {
+        svg += dimArrow(x, x + slitPos, dimY, `${slitPos.toFixed(0)}mm`, '#aa8800', false);
+      }
+      if (wMm - slitPos > 2) {
+        svg += dimArrow(x + slitPos, x + wMm, dimY, `${(wMm - slitPos).toFixed(0)}mm`, '#aa8800', false);
+      }
+    }
+
+    // Grating mark on bottom wall
+    if (w.name === 'Bottom') {
+      const gPos = gratingT * wMm;
+      svg += `<line x1="${x + gPos}" y1="${y0}" x2="${x + gPos}" y2="${y0 + dH}" stroke="#e94560" stroke-width="0.5" stroke-dasharray="2,1.5"/>`;
+      svg += `<text x="${x + gPos}" y="${y0 + dH/2 + 1.5}" text-anchor="middle" font-size="3.5" font-family="Arial" fill="#e94560">GRATING</text>`;
+      // Dimension: left edge to grating, grating to right edge
+      const dimY = y0 + dH + 8;
+      if (gPos > 2) {
+        svg += dimArrow(x, x + gPos, dimY, `${gPos.toFixed(0)}mm`, '#e94560', false);
+      }
+      if (wMm - gPos > 2) {
+        svg += dimArrow(x + gPos, x + wMm, dimY, `${(wMm - gPos).toFixed(0)}mm`, '#e94560', false);
+      }
+    }
+
+    x += wMm;
+  });
+
+  // Close SVG
+  svg += `</svg>`;
+
+  const w = window.open('', '_blank');
+  w.document.write(`<!DOCTYPE html><html><head><title>Box Cutout</title><style>
+    body { margin: 0; background: #f5f5f5; display: flex; flex-direction: column; height: 100vh; }
+    svg { flex: 1; background: white; }
+    .actions { padding: 8px; text-align: center; background: #eee; }
+    button { padding: 8px 20px; font-size: 14px; cursor: pointer; margin: 0 8px; }
+  </style></head><body>
+    <div class="actions">
+      <button onclick="window.print()">Print</button>
+    </div>
+    ${svg}
+  </body></html>`);
+  w.document.close();
+});
 </script>
 </body>
 </html>
