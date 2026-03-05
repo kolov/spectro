@@ -320,13 +320,11 @@ function draw() {
     { x: lensFront.x - lpx * lensR_mm, y: lensFront.y - lpy * lensR_mm },
   ];
 
-  // Visible extent includes lens for scaling
-  const visAllX = [...allX, ...lensCorners.map(c => c.x)];
-  const visAllY = [...allY, ...lensCorners.map(c => c.y)];
-  const visMinX = Math.min(...visAllX) - 5;
-  const visMaxX = Math.max(...visAllX) + 5;
-  const visMinY = Math.min(...visAllY) - 5;
-  const visMaxY = Math.max(...visAllY) + 5;
+  // Visible extent includes both box and lens
+  const visMinX = Math.min(boxMinX, ...lensCorners.map(c => c.x)) - 5;
+  const visMaxX = Math.max(boxMaxX, ...lensCorners.map(c => c.x)) + 5;
+  const visMinY = Math.min(boxMinY, ...lensCorners.map(c => c.y)) - 5;
+  const visMaxY = Math.max(boxMaxY, ...lensCorners.map(c => c.y)) + 5;
   const visW_mm = visMaxX - visMinX;
   const visH_mm = visMaxY - visMinY;
 
@@ -748,13 +746,6 @@ function draw() {
   ctx.textAlign = 'left';
   ctx.fillText(`${grFromLeft.toFixed(0)} mm`, bx0 + 4, grSy - 6);
 
-  // Grating from bottom
-  ctx.setLineDash([2,3]);
-  ctx.strokeStyle = 'rgba(74,111,165,0.3)';
-  ctx.beginPath(); ctx.moveTo(grSx, by1); ctx.lineTo(grSx, grSy + grDrawLen + 32); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.textAlign = 'left';
-  ctx.fillText(`${grFromBottom.toFixed(0)} mm from bottom`, grSx + 4, by1 - 6);
 
   // ---- SENSOR POSITION: projection lines to grating and optical axis ----
   // First and last hit = spectrum endpoints
