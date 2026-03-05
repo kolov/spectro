@@ -55,6 +55,31 @@
     <input type="range" id="diffOrder" min="1" max="3" step="1" value="1">
     <div class="value" id="diffOrderVal">1</div>
   </div>
+  <div class="control-group">
+    <label>Grating height (mm)</label>
+    <input type="range" id="gratingHeight" min="10" max="80" value="36">
+    <div class="value" id="gratingHeightVal">36</div>
+  </div>
+  <div class="control-group">
+    <label>Grating-bottom gap (mm)</label>
+    <input type="range" id="gratingGap" min="0" max="30" value="0">
+    <div class="value" id="gratingGapVal">0</div>
+  </div>
+  <div class="control-group">
+    <label>Extra box length (mm)</label>
+    <input type="range" id="boxExtra" min="0" max="100" value="0">
+    <div class="value" id="boxExtraVal">0</div>
+  </div>
+  <div class="control-group">
+    <label>Lens body diam (mm)</label>
+    <input type="range" id="lensBodyDiam" min="20" max="100" value="67">
+    <div class="value" id="lensBodyDiamVal">67</div>
+  </div>
+  <div class="control-group">
+    <label>Lens aperture (mm)</label>
+    <input type="range" id="lensAperture" min="10" max="80" value="30">
+    <div class="value" id="lensApertureVal">30</div>
+  </div>
 </div>
 
 <div class="dims" id="dims"></div>
@@ -64,7 +89,7 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 
-const controls = ['slitDist','gratingDensity','sensorDist','lambdaMin','lambdaMax','incAngle','diffOrder'];
+const controls = ['slitDist','gratingDensity','sensorDist','lambdaMin','lambdaMax','incAngle','diffOrder','gratingHeight','gratingGap','boxExtra','lensBodyDiam','lensAperture'];
 controls.forEach(id => {
   const el = document.getElementById(id);
   el.addEventListener('input', () => { document.getElementById(id+'Val').textContent = el.value; draw(); });
@@ -79,6 +104,11 @@ function getParams() {
     lambdaMax: +document.getElementById('lambdaMax').value,
     incAngleDeg: +document.getElementById('incAngle').value,
     m: +document.getElementById('diffOrder').value,
+    gratingHeight: +document.getElementById('gratingHeight').value,
+    gratingGap: +document.getElementById('gratingGap').value,
+    boxExtra: +document.getElementById('boxExtra').value,
+    lensBodyDiam: +document.getElementById('lensBodyDiam').value,
+    lensAperture: +document.getElementById('lensAperture').value,
   };
 }
 
@@ -249,24 +279,65 @@ function draw() {
   const s2x_mm = scX_mm + stX * (sMaxS + sensorMargin_mm);
   const s2y_mm = scY_mm + stY * (sMaxS + sensorMargin_mm);
 
-  const allX = [slitX_mm, 0, s1x_mm, s2x_mm, ...hits.map(h=>h.x)];
-  const allY = [slitY_mm, 0, s1y_mm, s2y_mm, ...hits.map(h=>h.y)];
+  // Box sized to fit optics only (slit, grating, sensor)
+  // Grating bottom edge defines the box bottom wall
+  const gratingBottom_mm = -p.gratingHeight / 2;
+  const boxBottomFromGrating = p.gratingGap; // gap between grating bottom and box bottom
+  const allX = [0, s1x_mm, s2x_mm, ...hits.map(h=>h.x)];
+  const allY = [slitY_mm, gratingBottom_mm, p.gratingHeight / 2, s1y_mm, s2y_mm, ...hits.map(h=>h.y)];
   const wallPad = 10;
-  const boxMinX = Math.min(...allX) - wallPad;
-  const boxMaxX = Math.max(...allX) + wallPad;
-  const boxMinY = Math.min(...allY) - wallPad;
+  const boxMinX = slitX_mm; // slit sits on the left wall
+  const boxMaxX = Math.max(...allX) + wallPad + p.boxExtra;
+  const boxMinY = gratingBottom_mm - boxBottomFromGrating; // grating bottom - gap = box bottom
   const boxMaxY = Math.max(...allY) + wallPad;
   const boxW_mm = boxMaxX - boxMinX;
   const boxH_mm = boxMaxY - boxMinY;
 
-  // Scale to fit
+  // Lens cylinder: bottom (film plane) at sensor center, extends outward along central ray
+  const cdx = Math.cos(centralBeta);
+  const cdy = Math.sin(centralBeta);
+  const lpx = -Math.sin(centralBeta);
+  const lpy = Math.cos(centralBeta);
+  const lensR_mm = p.lensBodyDiam / 2;
+  const lensProtrusion = 10; // mm sticking out past box wall
+
+  // Auto-calculate barrel length: find where the central ray exits the box, then add 10mm
+  // Ray from sensor center (scX_mm, scY_mm) in direction (cdx, cdy)
+  // Find t where it hits a box wall
+  let tWall = Infinity;
+  if (cdx > 0) tWall = Math.min(tWall, (boxMaxX - scX_mm) / cdx);
+  if (cdx < 0) tWall = Math.min(tWall, (boxMinX - scX_mm) / cdx);
+  if (cdy > 0) tWall = Math.min(tWall, (boxMaxY - scY_mm) / cdy);
+  if (cdy < 0) tWall = Math.min(tWall, (boxMinY - scY_mm) / cdy);
+  const lensBarrelLen = Math.max(20, tWall + lensProtrusion);
+
+  const lensBack = { x: scX_mm, y: scY_mm }; // film plane
+  const lensFront = { x: scX_mm + lensBarrelLen * cdx, y: scY_mm + lensBarrelLen * cdy };
+  const lensCorners = [
+    { x: lensBack.x + lpx * lensR_mm, y: lensBack.y + lpy * lensR_mm },
+    { x: lensBack.x - lpx * lensR_mm, y: lensBack.y - lpy * lensR_mm },
+    { x: lensFront.x + lpx * lensR_mm, y: lensFront.y + lpy * lensR_mm },
+    { x: lensFront.x - lpx * lensR_mm, y: lensFront.y - lpy * lensR_mm },
+  ];
+
+  // Visible extent includes lens for scaling
+  const visAllX = [...allX, ...lensCorners.map(c => c.x)];
+  const visAllY = [...allY, ...lensCorners.map(c => c.y)];
+  const visMinX = Math.min(...visAllX) - 5;
+  const visMaxX = Math.max(...visAllX) + 5;
+  const visMinY = Math.min(...visAllY) - 5;
+  const visMaxY = Math.max(...visAllY) + 5;
+  const visW_mm = visMaxX - visMinX;
+  const visH_mm = visMaxY - visMinY;
+
+  // Scale to fit the full visible extent
   const margin = 110;
   const drawW = W - 2 * margin;
   const drawH = H - 2 * margin;
-  const scale = Math.min(drawW / boxW_mm, drawH / boxH_mm) * 0.85;
+  const scale = Math.min(drawW / visW_mm, drawH / visH_mm) * 0.85;
 
-  const centerX_mm = (boxMinX + boxMaxX) / 2;
-  const centerY_mm = (boxMinY + boxMaxY) / 2;
+  const centerX_mm = (visMinX + visMaxX) / 2;
+  const centerY_mm = (visMinY + visMaxY) / 2;
   function toScr(xmm, ymm) {
     return [
       W/2 + (xmm - centerX_mm) * scale,
@@ -308,9 +379,10 @@ function draw() {
   ctx.textAlign = 'center';
   ctx.fillText('SLIT', slSx, slSy - 22);
 
-  // ---- GRATING ----
+  // ---- GRATING (36mm high, drawn to scale) ----
   const [grSx, grSy] = toScr(0, 0);
-  const grDrawLen = 35;
+  const gratingHeight_mm = p.gratingHeight;
+  const grDrawLen = (gratingHeight_mm / 2) * scale;
   // Grating is vertical (along Y axis)
   ctx.strokeStyle = '#e94560';
   ctx.lineWidth = 2;
@@ -320,17 +392,18 @@ function draw() {
   ctx.stroke();
   // Hash marks (horizontal ticks on grating)
   ctx.lineWidth = 1;
-  for (let i = -7; i <= 7; i++) {
+  const hashSpacing = Math.max(3, Math.min(6, grDrawLen / 8));
+  for (let y = grSy - grDrawLen + hashSpacing; y < grSy + grDrawLen; y += hashSpacing) {
     ctx.beginPath();
-    ctx.moveTo(grSx - 5, grSy + i * 5);
-    ctx.lineTo(grSx + 5, grSy + i * 5);
+    ctx.moveTo(grSx - 5, y);
+    ctx.lineTo(grSx + 5, y);
     ctx.stroke();
   }
   ctx.fillStyle = '#e94560';
   ctx.font = '12px Arial';
   ctx.textAlign = 'center';
   ctx.fillText(`GRATING`, grSx, grSy + grDrawLen + 16);
-  ctx.fillText(`${p.N} l/mm`, grSx, grSy + grDrawLen + 30);
+  ctx.fillText(`${p.N} l/mm, ${gratingHeight_mm}mm`, grSx, grSy + grDrawLen + 30);
 
   // ---- GRATING NORMAL (dashed, pointing +X) ----
   const normLen_mm = 20;
@@ -450,6 +523,185 @@ function draw() {
   ctx.textAlign = 'center';
   const [scSx, scSy] = toScr(scX_mm, scY_mm);
   ctx.fillText('SENSOR', (ss1x+ss2x)/2 + 15, Math.max(ss1y, ss2y) + 22);
+
+  // ---- LENS CYLINDER (top-down = rectangle) ----
+  // 4 corners on screen
+  const lcScr = lensCorners.map(c => toScr(c.x, c.y));
+  const [lfScr_x, lfScr_y] = toScr(lensFront.x, lensFront.y);
+  const [lbScr_x, lbScr_y] = toScr(lensBack.x, lensBack.y);
+
+  // Fill lens body (semi-transparent)
+  ctx.fillStyle = 'rgba(180,150,60,0.12)';
+  ctx.beginPath();
+  ctx.moveTo(lcScr[0][0], lcScr[0][1]);
+  ctx.lineTo(lcScr[2][0], lcScr[2][1]);
+  ctx.lineTo(lcScr[3][0], lcScr[3][1]);
+  ctx.lineTo(lcScr[1][0], lcScr[1][1]);
+  ctx.closePath();
+  ctx.fill();
+
+  // Lens body outline
+  ctx.strokeStyle = '#c0a040';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(lcScr[0][0], lcScr[0][1]);
+  ctx.lineTo(lcScr[2][0], lcScr[2][1]);
+  ctx.lineTo(lcScr[3][0], lcScr[3][1]);
+  ctx.lineTo(lcScr[1][0], lcScr[1][1]);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Back face (film plane) — thicker line
+  ctx.strokeStyle = '#e0d070';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(lcScr[0][0], lcScr[0][1]);
+  ctx.lineTo(lcScr[1][0], lcScr[1][1]);
+  ctx.stroke();
+
+  // Front face (aperture opening) — show effective aperture
+  const apertureR_mm = p.lensAperture / 2;
+  const apTL = toScr(lensFront.x + lpx * apertureR_mm, lensFront.y + lpy * apertureR_mm);
+  const apBR = toScr(lensFront.x - lpx * apertureR_mm, lensFront.y - lpy * apertureR_mm);
+  // Blocked parts of front face (body minus aperture)
+  ctx.strokeStyle = '#c0a040';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(lcScr[2][0], lcScr[2][1]);
+  ctx.lineTo(apTL[0], apTL[1]);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(apBR[0], apBR[1]);
+  ctx.lineTo(lcScr[3][0], lcScr[3][1]);
+  ctx.stroke();
+  // Aperture opening (gap in front face)
+  ctx.strokeStyle = '#e0d070';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(apTL[0], apTL[1]);
+  ctx.lineTo(apBR[0], apBR[1]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Label aperture
+  ctx.fillStyle = '#e0d070';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(`aperture ${p.lensAperture}mm`, lfScr_x, lfScr_y - lensR_mm * scale - 6);
+
+  // Lens center axis dot
+  const lensMidX = (lensBack.x + lensFront.x) / 2;
+  const lensMidY = (lensBack.y + lensFront.y) / 2;
+  const [lmSx, lmSy] = toScr(lensMidX, lensMidY);
+  ctx.fillStyle = '#e0d070';
+  ctx.beginPath();
+  ctx.arc(lmSx, lmSy, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Label lens
+  ctx.fillStyle = '#c0a040';
+  ctx.font = '12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('LENS', lmSx, lmSy - lensR_mm * scale - 20);
+  ctx.font = '10px Arial';
+  ctx.fillText(`body ${p.lensBodyDiam}mm`, lmSx, lmSy - lensR_mm * scale - 34);
+
+  // Label back face
+  ctx.fillStyle = '#e0d070';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('film plane', lbScr_x, lbScr_y + lensR_mm * scale + 14);
+
+  // ---- Show where lens crosses box walls (CUT markers) ----
+  // For each box wall, find the portion inside the lens rectangle.
+  // A point P is inside the lens rect if:
+  //   0 <= (P - lensBack) · (cdx,cdy) <= lensBarrelLen
+  //   -lensR_mm <= (P - lensBack) · (lpx,lpy) <= lensR_mm
+  function pointInLens(px, py) {
+    const vx = px - lensBack.x, vy = py - lensBack.y;
+    const along = vx * cdx + vy * cdy;
+    const perp = vx * lpx + vy * lpy;
+    return along >= 0 && along <= lensBarrelLen && perp >= -lensR_mm && perp <= lensR_mm;
+  }
+
+  // For a box wall segment A→B, find t range [0,1] where the wall is inside the lens rect
+  function wallInsideLens(ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const vx0 = ax - lensBack.x, vy0 = ay - lensBack.y;
+    // along(t) = a0 + t*da, perp(t) = p0 + t*dp
+    const a0 = vx0 * cdx + vy0 * cdy, da = dx * cdx + dy * cdy;
+    const p0 = vx0 * lpx + vy0 * lpy, dp = dx * lpx + dy * lpy;
+    // Constraints: 0 <= a0+t*da <= barrelLen, -R <= p0+t*dp <= R
+    let tMin = 0, tMax = 1;
+    function clip(c0, dc, lo, hi) {
+      if (Math.abs(dc) < 1e-10) {
+        if (c0 < lo || c0 > hi) { tMin = 1; tMax = 0; }
+        return;
+      }
+      let t1 = (lo - c0) / dc, t2 = (hi - c0) / dc;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      tMin = Math.max(tMin, t1);
+      tMax = Math.min(tMax, t2);
+    }
+    clip(a0, da, 0, lensBarrelLen);
+    clip(p0, dp, -lensR_mm, lensR_mm);
+    if (tMin >= tMax) return null;
+    return {
+      x1: ax + tMin * dx, y1: ay + tMin * dy,
+      x2: ax + tMax * dx, y2: ay + tMax * dy,
+    };
+  }
+
+  const boxEdges = [
+    { name: 'top', x1: boxMinX, y1: boxMaxY, x2: boxMaxX, y2: boxMaxY },
+    { name: 'bottom', x1: boxMinX, y1: boxMinY, x2: boxMaxX, y2: boxMinY },
+    { name: 'left', x1: boxMinX, y1: boxMinY, x2: boxMinX, y2: boxMaxY },
+    { name: 'right', x1: boxMaxX, y1: boxMinY, x2: boxMaxX, y2: boxMaxY },
+  ];
+
+  ctx.strokeStyle = '#ff6600';
+  ctx.lineWidth = 4;
+  boxEdges.forEach(edge => {
+    const cut = wallInsideLens(edge.x1, edge.y1, edge.x2, edge.y2);
+    if (!cut) return;
+    const [csx1, csy1] = toScr(cut.x1, cut.y1);
+    const [csx2, csy2] = toScr(cut.x2, cut.y2);
+
+    // Draw the cut segment
+    ctx.beginPath();
+    ctx.moveTo(csx1, csy1);
+    ctx.lineTo(csx2, csy2);
+    ctx.stroke();
+
+    // Label cut length
+    const cutLen = Math.sqrt((cut.x2 - cut.x1)**2 + (cut.y2 - cut.y1)**2);
+    ctx.fillStyle = '#ff6600';
+    ctx.font = 'bold 11px Arial';
+    ctx.textAlign = 'center';
+    const cutMx = (csx1+csx2)/2, cutMy = (csy1+csy2)/2;
+    if (edge.name === 'top' || edge.name === 'bottom') {
+      const off = edge.name === 'top' ? -14 : 18;
+      ctx.fillText(`CUT ${cutLen.toFixed(0)}mm`, cutMx, cutMy + off);
+    } else {
+      ctx.save();
+      const off = edge.name === 'left' ? -10 : 10;
+      ctx.translate(cutMx + off, cutMy);
+      ctx.rotate(-Math.PI/2);
+      ctx.fillText(`CUT ${cutLen.toFixed(0)}mm`, 0, 0);
+      ctx.restore();
+    }
+  });
+
+  // ---- Lens focusing distance ----
+  // Slit → grating → lens front (aperture)
+  const slitToLensFront_mm = p.slitDist + p.sensorDist + lensBarrelLen;
+  // Slit → grating → film plane
+  const slitToFilm_mm = p.slitDist + p.sensorDist;
+
+  // Draw slit-to-film-plane distance
+  drawDimension(slSx, slSy, lbScr_x, lbScr_y, `slit-film ${slitToFilm_mm.toFixed(0)} mm`, 38, 1);
 
   // ---- DIMENSION LINES ----
 
@@ -623,6 +875,10 @@ function draw() {
     <div class="item"><div class="lbl">Grating from bottom</div><div class="val">${grFromBottom.toFixed(0)} mm</div></div>
     <div class="item"><div class="lbl">${hitFirst.nm}nm (X, Y)</div><div class="val">${hitFirst.x.toFixed(1)}, ${hitFirst.y.toFixed(1)} mm</div></div>
     <div class="item"><div class="lbl">${hitLast.nm}nm (X, Y)</div><div class="val">${hitLast.x.toFixed(1)}, ${hitLast.y.toFixed(1)} mm</div></div>
+    <div class="item"><div class="lbl">Slit to film</div><div class="val">${slitToFilm_mm.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">Slit to lens front</div><div class="val">${slitToLensFront_mm.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">Film plane (X, Y)</div><div class="val">${scX_mm.toFixed(1)}, ${scY_mm.toFixed(1)} mm</div></div>
+    <div class="item"><div class="lbl">Lens front (X, Y)</div><div class="val">${lensFront.x.toFixed(1)}, ${lensFront.y.toFixed(1)} mm</div></div>
   `;
 
   // Footer
