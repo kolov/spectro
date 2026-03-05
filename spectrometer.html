@@ -504,6 +504,88 @@ function draw() {
   ctx.textAlign = 'left';
   ctx.fillText(`${grFromBottom.toFixed(0)} mm from bottom`, grSx + 4, by1 - 6);
 
+  // ---- SENSOR POSITION: projection lines to grating and optical axis ----
+  // First and last hit = spectrum endpoints
+  const hitFirst = hits[0];
+  const hitLast = hits[hits.length - 1];
+  // Sensor center
+  const sensorEndpoints = [
+    { label: `${hitFirst.nm}nm`, x: hitFirst.x, y: hitFirst.y },
+    { label: `${hitLast.nm}nm`, x: hitLast.x, y: hitLast.y },
+  ];
+
+  // Draw optical axis (X axis through grating)
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(bx0, grSy);
+  ctx.lineTo(bx1, grSy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#ffffff33';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText('optical axis', bx1 - 4, grSy - 4);
+
+  // Draw vertical reference through grating
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(grSx, by0);
+  ctx.lineTo(grSx, by1);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // For each sensor endpoint, draw horizontal and vertical projection lines
+  const projColors = ['#66ddaa', '#ddaa66'];
+  sensorEndpoints.forEach((ep, idx) => {
+    const [epSx, epSy] = toScr(ep.x, ep.y);
+    const color = projColors[idx];
+
+    // Vertical projection line: from endpoint down/up to optical axis (y=0)
+    const [, axSy] = toScr(ep.x, 0);
+    ctx.strokeStyle = color + '55';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(epSx, epSy);
+    ctx.lineTo(epSx, axSy);
+    ctx.stroke();
+
+    // Horizontal projection line: from endpoint left to grating plane (x=0)
+    const [grPx] = toScr(0, ep.y);
+    ctx.beginPath();
+    ctx.moveTo(epSx, epSy);
+    ctx.lineTo(grPx, epSy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label: horizontal distance from grating (X coordinate)
+    ctx.fillStyle = color;
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'center';
+    const hMidX = (epSx + grPx) / 2;
+    ctx.fillText(`${ep.x.toFixed(1)}`, hMidX, epSy + (idx === 0 ? -5 : 14));
+
+    // Label: vertical distance from axis (Y coordinate)
+    const vMidY = (epSy + axSy) / 2;
+    ctx.textAlign = 'left';
+    ctx.fillText(`${ep.y.toFixed(1)}`, epSx + 4, vMidY + 4);
+
+    // Small marker at endpoint
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(epSx, epSy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Label the endpoint
+    ctx.fillStyle = color;
+    ctx.font = '10px Arial';
+    ctx.textAlign = idx === 0 ? 'right' : 'left';
+    ctx.fillText(ep.label, epSx + (idx === 0 ? -8 : 8), epSy - 8);
+  });
+
   // ---- Diffraction angle arcs for min/max wavelength ----
   const betaMin = hits[0].beta;
   const betaMax = hits[hits.length-1].beta;
@@ -539,6 +621,8 @@ function draw() {
     <div class="item"><div class="lbl">Slit from left</div><div class="val">${slitFromLeft.toFixed(0)} mm</div></div>
     <div class="item"><div class="lbl">Grating from left</div><div class="val">${grFromLeft.toFixed(0)} mm</div></div>
     <div class="item"><div class="lbl">Grating from bottom</div><div class="val">${grFromBottom.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">${hitFirst.nm}nm (X, Y)</div><div class="val">${hitFirst.x.toFixed(1)}, ${hitFirst.y.toFixed(1)} mm</div></div>
+    <div class="item"><div class="lbl">${hitLast.nm}nm (X, Y)</div><div class="val">${hitLast.x.toFixed(1)}, ${hitLast.y.toFixed(1)} mm</div></div>
   `;
 
   // Footer
