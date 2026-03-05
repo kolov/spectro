@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spectrometer Box Design — Transmission Grating</title>
+<style>
+  body { margin: 0; font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; display: flex; flex-direction: column; height: 100vh; }
+  .controls { padding: 10px 20px; background: #16213e; display: flex; flex-wrap: wrap; gap: 18px; align-items: center; border-bottom: 1px solid #0f3460; }
+  .control-group { display: flex; flex-direction: column; gap: 2px; }
+  .control-group label { font-size: 11px; color: #aaa; text-transform: uppercase; }
+  .control-group .value { font-size: 13px; color: #e94560; font-weight: bold; }
+  input[type=range] { width: 150px; accent-color: #e94560; }
+  canvas { flex: 1; }
+  .dims { padding: 10px 20px; background: #0f3460; font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap; border-top: 1px solid #0f3460; }
+  .dims .item { display: flex; flex-direction: column; }
+  .dims .item .lbl { font-size: 10px; color: #888; text-transform: uppercase; }
+  .dims .item .val { color: #e94560; font-weight: bold; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Slit to Grating (mm)</label>
+    <input type="range" id="slitDist" min="20" max="200" value="80">
+    <div class="value" id="slitDistVal">80</div>
+  </div>
+  <div class="control-group">
+    <label>Grating (lines/mm)</label>
+    <input type="range" id="gratingDensity" min="300" max="1800" step="100" value="600">
+    <div class="value" id="gratingDensityVal">600</div>
+  </div>
+  <div class="control-group">
+    <label>Grating to Sensor (mm)</label>
+    <input type="range" id="sensorDist" min="20" max="200" value="80">
+    <div class="value" id="sensorDistVal">80</div>
+  </div>
+  <div class="control-group">
+    <label>Lambda min (nm)</label>
+    <input type="range" id="lambdaMin" min="200" max="600" step="5" value="350">
+    <div class="value" id="lambdaMinVal">350</div>
+  </div>
+  <div class="control-group">
+    <label>Lambda max (nm)</label>
+    <input type="range" id="lambdaMax" min="400" max="900" step="5" value="800">
+    <div class="value" id="lambdaMaxVal">800</div>
+  </div>
+  <div class="control-group">
+    <label>Incidence angle (deg)</label>
+    <input type="range" id="incAngle" min="0" max="45" step="1" value="0">
+    <div class="value" id="incAngleVal">0</div>
+  </div>
+  <div class="control-group">
+    <label>Diffraction order</label>
+    <input type="range" id="diffOrder" min="1" max="3" step="1" value="1">
+    <div class="value" id="diffOrderVal">1</div>
+  </div>
+</div>
+
+<div class="dims" id="dims"></div>
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const controls = ['slitDist','gratingDensity','sensorDist','lambdaMin','lambdaMax','incAngle','diffOrder'];
+controls.forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => { document.getElementById(id+'Val').textContent = el.value; draw(); });
+});
+
+function getParams() {
+  return {
+    slitDist: +document.getElementById('slitDist').value,
+    N: +document.getElementById('gratingDensity').value,
+    sensorDist: +document.getElementById('sensorDist').value,
+    lambdaMin: +document.getElementById('lambdaMin').value,
+    lambdaMax: +document.getElementById('lambdaMax').value,
+    incAngleDeg: +document.getElementById('incAngle').value,
+    m: +document.getElementById('diffOrder').value,
+  };
+}
+
+function wavelengthToRGB(nm) {
+  let r=0, g=0, b=0;
+  if (nm < 380) { r=0.4; g=0; b=0.4; }
+  else if (nm < 440) { r=-(nm-440)/(440-380); g=0; b=1; }
+  else if (nm < 490) { r=0; g=(nm-440)/(490-440); b=1; }
+  else if (nm < 510) { r=0; g=1; b=-(nm-510)/(510-490); }
+  else if (nm < 580) { r=(nm-510)/(580-510); g=1; b=0; }
+  else if (nm < 645) { r=1; g=-(nm-645)/(645-580); b=0; }
+  else if (nm < 781) { r=1; g=0; b=0; }
+  else { r=0.5; g=0; b=0; }
+  let factor = 1.0;
+  if (nm < 380) factor = 0.3;
+  else if (nm < 420) factor = 0.3 + 0.7*(nm-380)/(420-380);
+  else if (nm > 700) factor = 0.3 + 0.7*(780-nm)/(780-700);
+  if (nm > 780) factor = 0.2;
+  return `rgb(${Math.round(r*factor*255)},${Math.round(g*factor*255)},${Math.round(b*factor*255)})`;
+}
+
+// Transmission grating: d·(sin(beta) - sin(alpha)) = m·lambda
+// alpha = incidence angle, beta = diffraction angle (both from normal, on exit side)
+// sin(beta) = sin(alpha) + m·lambda/d
+function diffractionAngle(lambdaNm, N, incAngleDeg, m) {
+  const d = 1.0 / N; // mm per line
+  const lambdaMm = lambdaNm * 1e-6;
+  const alpha = incAngleDeg * Math.PI / 180;
+  const sinBeta = Math.sin(alpha) + m * lambdaMm / d;
+  if (sinBeta < -1 || sinBeta > 1) return null;
+  return Math.asin(sinBeta);
+}
+
+// Draw a dimension line with arrows and label
+function drawDimension(x1, y1, x2, y2, label, offset, side) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.sqrt(dx*dx + dy*dy);
+  if (len < 1) return;
+  const nx = -dy/len * offset * side;
+  const ny = dx/len * offset * side;
+  const ax1 = x1 + nx, ay1 = y1 + ny;
+  const ax2 = x2 + nx, ay2 = y2 + ny;
+
+  ctx.strokeStyle = '#88aacc';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+
+  // Extension lines
+  ctx.beginPath();
+  ctx.moveTo(x1, y1); ctx.lineTo(ax1, ay1);
+  ctx.moveTo(x2, y2); ctx.lineTo(ax2, ay2);
+  ctx.stroke();
+
+  // Dimension line
+  ctx.beginPath();
+  ctx.moveTo(ax1, ay1); ctx.lineTo(ax2, ay2);
+  ctx.stroke();
+
+  // Arrowheads
+  const arrowLen = 8, arrowW = 3;
+  const ux = dx/len, uy = dy/len;
+  ctx.fillStyle = '#88aacc';
+  ctx.beginPath();
+  ctx.moveTo(ax1, ay1);
+  ctx.lineTo(ax1 + ux*arrowLen + uy*arrowW, ay1 + uy*arrowLen - ux*arrowW);
+  ctx.lineTo(ax1 + ux*arrowLen - uy*arrowW, ay1 + uy*arrowLen + ux*arrowW);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(ax2, ay2);
+  ctx.lineTo(ax2 - ux*arrowLen + uy*arrowW, ay2 - uy*arrowLen - ux*arrowW);
+  ctx.lineTo(ax2 - ux*arrowLen - uy*arrowW, ay2 - uy*arrowLen + ux*arrowW);
+  ctx.closePath(); ctx.fill();
+
+  // Label
+  const mx = (ax1+ax2)/2, my = (ay1+ay2)/2;
+  ctx.save();
+  ctx.translate(mx, my);
+  let angle = Math.atan2(dy, dx);
+  if (angle > Math.PI/2) angle -= Math.PI;
+  if (angle < -Math.PI/2) angle += Math.PI;
+  ctx.rotate(angle);
+  ctx.fillStyle = '#cde';
+  ctx.font = 'bold 12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, 0, -5);
+  ctx.restore();
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, W, H);
+
+  const p = getParams();
+  const alpha = p.incAngleDeg * Math.PI / 180;
+
+  // Coordinate system (mm): grating at origin
+  // X = horizontal (light travels left to right, +X direction)
+  // Y = vertical (perpendicular to optical axis)
+  // Grating is vertical (along Y axis), normal points +X
+  // Slit is to the left, sensor to the right
+
+  // Slit position: light comes from the left at incidence angle alpha
+  // Incidence angle is measured from grating normal (+X)
+  const slitX_mm = -p.slitDist * Math.cos(alpha);
+  const slitY_mm = -p.slitDist * Math.sin(alpha);
+
+  // Compute diffraction angles for each wavelength
+  const step = 5;
+  const rays = [];
+  for (let lam = p.lambdaMin; lam <= p.lambdaMax; lam += step) {
+    const beta = diffractionAngle(lam, p.N, p.incAngleDeg, p.m);
+    if (beta !== null) rays.push({ nm: lam, beta });
+  }
+
+  if (rays.length < 2) {
+    ctx.fillStyle = '#e94560';
+    ctx.font = '18px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('No valid diffraction for these parameters!', W/2, H/2);
+    ctx.font = '14px Arial';
+    ctx.fillText('Try reducing grating density, wavelength range, or diffraction order', W/2, H/2 + 30);
+    document.getElementById('dims').innerHTML = '';
+    return;
+  }
+
+  // Central diffraction angle (for sensor orientation)
+  const centralBeta = diffractionAngle((p.lambdaMin + p.lambdaMax) / 2, p.N, p.incAngleDeg, p.m);
+
+  // Sensor center: along central diffracted ray at sensorDist
+  // Diffracted ray direction for angle beta from normal (+X):
+  // dx = cos(beta), dy = sin(beta)
+  const scX_mm = p.sensorDist * Math.cos(centralBeta);
+  const scY_mm = p.sensorDist * Math.sin(centralBeta);
+
+  // Sensor tangent: perpendicular to central ray
+  const stX = -Math.sin(centralBeta);
+  const stY = Math.cos(centralBeta);
+
+  // Find where each ray hits the sensor plane
+  const hits = [];
+  rays.forEach(({nm, beta}) => {
+    // Ray direction (through grating, on exit side)
+    const rdx = Math.cos(beta);
+    const rdy = Math.sin(beta);
+    // Intersect: origin + t*(rdx,rdy) = (scX,scY) + s*(stX,stY)
+    const det = rdx * stY - rdy * stX;
+    if (Math.abs(det) < 1e-10) return;
+    const t = (scX_mm * stY - scY_mm * stX) / det;
+    const s = (scX_mm * rdy - scY_mm * rdx) / det;
+    hits.push({ nm, beta, x: rdx * t, y: rdy * t, s, t });
+  });
+
+  if (hits.length < 2) return;
+
+  // Bounding box in mm
+  const sMinS = Math.min(...hits.map(h => h.s));
+  const sMaxS = Math.max(...hits.map(h => h.s));
+  const sensorMargin_mm = 3;
+  const s1x_mm = scX_mm + stX * (sMinS - sensorMargin_mm);
+  const s1y_mm = scY_mm + stY * (sMinS - sensorMargin_mm);
+  const s2x_mm = scX_mm + stX * (sMaxS + sensorMargin_mm);
+  const s2y_mm = scY_mm + stY * (sMaxS + sensorMargin_mm);
+
+  const allX = [slitX_mm, 0, s1x_mm, s2x_mm, ...hits.map(h=>h.x)];
+  const allY = [slitY_mm, 0, s1y_mm, s2y_mm, ...hits.map(h=>h.y)];
+  const wallPad = 10;
+  const boxMinX = Math.min(...allX) - wallPad;
+  const boxMaxX = Math.max(...allX) + wallPad;
+  const boxMinY = Math.min(...allY) - wallPad;
+  const boxMaxY = Math.max(...allY) + wallPad;
+  const boxW_mm = boxMaxX - boxMinX;
+  const boxH_mm = boxMaxY - boxMinY;
+
+  // Scale to fit
+  const margin = 110;
+  const drawW = W - 2 * margin;
+  const drawH = H - 2 * margin;
+  const scale = Math.min(drawW / boxW_mm, drawH / boxH_mm) * 0.85;
+
+  const centerX_mm = (boxMinX + boxMaxX) / 2;
+  const centerY_mm = (boxMinY + boxMaxY) / 2;
+  function toScr(xmm, ymm) {
+    return [
+      W/2 + (xmm - centerX_mm) * scale,
+      H/2 - (ymm - centerY_mm) * scale
+    ];
+  }
+
+  // ---- BOX ----
+  const [bx0, by0] = toScr(boxMinX, boxMaxY);
+  const [bx1, by1] = toScr(boxMaxX, boxMinY);
+
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(bx0, by0, bx1 - bx0, by1 - by0);
+  ctx.strokeStyle = '#4a6fa5';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([]);
+  ctx.strokeRect(bx0, by0, bx1 - bx0, by1 - by0);
+
+  // ---- SLIT ----
+  const [slSx, slSy] = toScr(slitX_mm, slitY_mm);
+  const slitDrawLen = 14;
+  // Slit is perpendicular to incident ray direction
+  const incDirX = Math.cos(alpha), incDirY = Math.sin(alpha);
+  const slitNx = -incDirY, slitNy = incDirX;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(slSx + slitNx * slitDrawLen, slSy - slitNy * slitDrawLen);
+  ctx.lineTo(slSx + slitNx * 3, slSy - slitNy * 3);
+  ctx.moveTo(slSx - slitNx * 3, slSy + slitNy * 3);
+  ctx.lineTo(slSx - slitNx * slitDrawLen, slSy + slitNy * slitDrawLen);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,200,0.8)';
+  ctx.beginPath();
+  ctx.arc(slSx, slSy, 3, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#ccc';
+  ctx.font = '13px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('SLIT', slSx, slSy - 22);
+
+  // ---- GRATING ----
+  const [grSx, grSy] = toScr(0, 0);
+  const grDrawLen = 35;
+  // Grating is vertical (along Y axis)
+  ctx.strokeStyle = '#e94560';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(grSx, grSy - grDrawLen);
+  ctx.lineTo(grSx, grSy + grDrawLen);
+  ctx.stroke();
+  // Hash marks (horizontal ticks on grating)
+  ctx.lineWidth = 1;
+  for (let i = -7; i <= 7; i++) {
+    ctx.beginPath();
+    ctx.moveTo(grSx - 5, grSy + i * 5);
+    ctx.lineTo(grSx + 5, grSy + i * 5);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#e94560';
+  ctx.font = '12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(`GRATING`, grSx, grSy + grDrawLen + 16);
+  ctx.fillText(`${p.N} l/mm`, grSx, grSy + grDrawLen + 30);
+
+  // ---- GRATING NORMAL (dashed, pointing +X) ----
+  const normLen_mm = 20;
+  const [nEx, nEy] = toScr(normLen_mm, 0);
+  const [nEx2, nEy2] = toScr(-normLen_mm, 0);
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(nEx2, nEy2);
+  ctx.lineTo(nEx, nEy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#555';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('normal', nEx + 3, nEy - 4);
+
+  // ---- INCIDENCE ANGLE ARC ----
+  if (p.incAngleDeg > 0) {
+    const arcR = 25;
+    ctx.strokeStyle = '#888';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    // Normal is at angle 0 (pointing right = +X = screen right)
+    // Incident ray comes from angle (180 + alpha) so the arc goes from 180 to 180+alpha
+    ctx.arc(grSx, grSy, arcR, Math.PI, Math.PI - alpha, true);
+    ctx.stroke();
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'right';
+    const arcMidA = Math.PI - alpha/2;
+    ctx.fillText(`α=${p.incAngleDeg}°`, grSx + (arcR+12)*Math.cos(arcMidA), grSy - (arcR+4)*Math.sin(arcMidA));
+  }
+
+  // ---- INCIDENT RAY ----
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(slSx, slSy);
+  ctx.lineTo(grSx, grSy);
+  ctx.stroke();
+  // Arrow on incident ray
+  const iMx = (slSx + grSx) / 2, iMy = (slSy + grSy) / 2;
+  const iux = (grSx - slSx) / p.slitDist, iuy = (grSy - slSy) / p.slitDist;
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(iMx + iux*8, iMy + iuy*8);
+  ctx.lineTo(iMx - iux*4 + iuy*4, iMy - iuy*4 - iux*4);
+  ctx.lineTo(iMx - iux*4 - iuy*4, iMy - iuy*4 + iux*4);
+  ctx.closePath(); ctx.fill();
+
+  // ---- DIFFRACTED RAYS ----
+  hits.forEach(({nm, x, y}) => {
+    const [hx, hy] = toScr(x, y);
+    ctx.strokeStyle = wavelengthToRGB(nm);
+    ctx.lineWidth = 1.2;
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    ctx.moveTo(grSx, grSy);
+    ctx.lineTo(hx, hy);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+  });
+
+  // ---- SENSOR ----
+  const [ss1x, ss1y] = toScr(s1x_mm, s1y_mm);
+  const [ss2x, ss2y] = toScr(s2x_mm, s2y_mm);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(ss1x, ss1y);
+  ctx.lineTo(ss2x, ss2y);
+  ctx.stroke();
+
+  // Spectrum dots on sensor
+  hits.forEach(({nm, x, y}) => {
+    const [hx, hy] = toScr(x, y);
+    ctx.fillStyle = wavelengthToRGB(nm);
+    ctx.beginPath();
+    ctx.arc(hx, hy, 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Wavelength labels
+  const labelWavelengths = [p.lambdaMin, 400, 450, 500, 550, 600, 650, 700, 750, p.lambdaMax];
+  const labeled = new Set();
+  hits.forEach(({nm, x, y}) => {
+    for (const lw of labelWavelengths) {
+      if (Math.abs(nm - lw) <= step/2 && !labeled.has(lw)) {
+        labeled.add(lw);
+        const [hx, hy] = toScr(x, y);
+        ctx.fillStyle = '#ddd';
+        ctx.font = '10px Arial';
+        ctx.save();
+        ctx.translate(hx, hy);
+        const la = Math.atan2(ss2y - ss1y, ss2x - ss1x);
+        ctx.rotate(la);
+        ctx.textAlign = 'center';
+        ctx.fillText(`${lw}`, 0, -8);
+        ctx.restore();
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 1;
+        const pdx = -(ss2y-ss1y), pdy = (ss2x-ss1x);
+        const pl = Math.sqrt(pdx*pdx+pdy*pdy);
+        ctx.beginPath();
+        ctx.moveTo(hx - pdx/pl*4, hy - pdy/pl*4);
+        ctx.lineTo(hx + pdx/pl*4, hy + pdy/pl*4);
+        ctx.stroke();
+      }
+    }
+  });
+
+  // Sensor label
+  ctx.fillStyle = '#ccc';
+  ctx.font = '13px Arial';
+  ctx.textAlign = 'center';
+  const [scSx, scSy] = toScr(scX_mm, scY_mm);
+  ctx.fillText('SENSOR', (ss1x+ss2x)/2 + 15, Math.max(ss1y, ss2y) + 22);
+
+  // ---- DIMENSION LINES ----
+
+  // Box width (bottom)
+  drawDimension(bx0, by1 + 5, bx1, by1 + 5, `${boxW_mm.toFixed(0)} mm`, 22, 1);
+
+  // Box height (right side)
+  drawDimension(bx1 + 5, by1, bx1 + 5, by0, `${boxH_mm.toFixed(0)} mm`, 22, 1);
+
+  // Slit to grating
+  drawDimension(slSx, slSy, grSx, grSy, `${p.slitDist} mm`, 20, 1);
+
+  // Grating to sensor center
+  drawDimension(grSx, grSy, scSx, scSy, `${p.sensorDist} mm`, 20, -1);
+
+  // Sensor length
+  const sensorSpanMm = Math.abs(sMaxS - sMinS);
+  const totalSensorMm = sensorSpanMm + 2 * sensorMargin_mm;
+  drawDimension(ss1x, ss1y, ss2x, ss2y, `${totalSensorMm.toFixed(1)} mm`, 24, 1);
+
+  // ---- Position from walls ----
+  const slitFromLeft = slitX_mm - boxMinX;
+  const slitFromBottom = slitY_mm - boxMinY;
+  const grFromLeft = 0 - boxMinX;
+  const grFromBottom = 0 - boxMinY;
+
+  ctx.fillStyle = '#7a9ec2';
+  ctx.font = '11px Arial';
+
+  // Slit from left wall
+  ctx.setLineDash([2,3]);
+  ctx.strokeStyle = 'rgba(74,111,165,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(bx0, slSy); ctx.lineTo(slSx - 16, slSy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.textAlign = 'left';
+  ctx.fillText(`${slitFromLeft.toFixed(0)} mm`, bx0 + 4, slSy - 6);
+
+  // Grating from left wall
+  ctx.setLineDash([2,3]);
+  ctx.strokeStyle = 'rgba(74,111,165,0.3)';
+  ctx.beginPath(); ctx.moveTo(bx0, grSy); ctx.lineTo(grSx - grDrawLen - 4, grSy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.textAlign = 'left';
+  ctx.fillText(`${grFromLeft.toFixed(0)} mm`, bx0 + 4, grSy - 6);
+
+  // Grating from bottom
+  ctx.setLineDash([2,3]);
+  ctx.strokeStyle = 'rgba(74,111,165,0.3)';
+  ctx.beginPath(); ctx.moveTo(grSx, by1); ctx.lineTo(grSx, grSy + grDrawLen + 32); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.textAlign = 'left';
+  ctx.fillText(`${grFromBottom.toFixed(0)} mm from bottom`, grSx + 4, by1 - 6);
+
+  // ---- Diffraction angle arcs for min/max wavelength ----
+  const betaMin = hits[0].beta;
+  const betaMax = hits[hits.length-1].beta;
+  const dArcR = 40;
+  ctx.strokeStyle = 'rgba(233,69,96,0.4)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2,2]);
+  ctx.beginPath();
+  // Angles on screen: beta=0 means +X direction, positive beta means upward
+  // On screen +X is right, +Y is down, so beta angle from +X axis going clockwise
+  ctx.arc(grSx, grSy, dArcR, -betaMax, -betaMin, false);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // Label angles
+  ctx.fillStyle = '#e9456088';
+  ctx.font = '10px Arial';
+  ctx.textAlign = 'left';
+  const betaMinDeg = (betaMin * 180 / Math.PI).toFixed(1);
+  const betaMaxDeg = (betaMax * 180 / Math.PI).toFixed(1);
+  ctx.fillText(`${betaMinDeg}°`, grSx + (dArcR+5)*Math.cos(-betaMin), grSy + (dArcR+5)*Math.sin(-betaMin) + 4);
+  ctx.fillText(`${betaMaxDeg}°`, grSx + (dArcR+5)*Math.cos(-betaMax), grSy + (dArcR+5)*Math.sin(-betaMax) + 4);
+
+  // ---- DIMS PANEL ----
+  const dispersion = sensorSpanMm / (p.lambdaMax - p.lambdaMin);
+
+  document.getElementById('dims').innerHTML = `
+    <div class="item"><div class="lbl">Box (W x H)</div><div class="val">${boxW_mm.toFixed(0)} x ${boxH_mm.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">Sensor span</div><div class="val">${sensorSpanMm.toFixed(1)} mm</div></div>
+    <div class="item"><div class="lbl">Sensor total</div><div class="val">${totalSensorMm.toFixed(1)} mm</div></div>
+    <div class="item"><div class="lbl">Diffr. angles</div><div class="val">${betaMinDeg} to ${betaMaxDeg} deg</div></div>
+    <div class="item"><div class="lbl">Spread</div><div class="val">${(Math.abs(betaMax - betaMin) * 180 / Math.PI).toFixed(1)} deg</div></div>
+    <div class="item"><div class="lbl">Dispersion</div><div class="val">${dispersion.toFixed(3)} mm/nm</div></div>
+    <div class="item"><div class="lbl">Slit from left</div><div class="val">${slitFromLeft.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">Grating from left</div><div class="val">${grFromLeft.toFixed(0)} mm</div></div>
+    <div class="item"><div class="lbl">Grating from bottom</div><div class="val">${grFromBottom.toFixed(0)} mm</div></div>
+  `;
+
+  // Footer
+  ctx.fillStyle = '#445';
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('Transmission grating: d·(sin β - sin α) = m·λ  |  All dimensions in mm  |  Top-down view', 10, H - 10);
+}
+
+window.addEventListener('resize', draw);
+draw();
+</script>
+</body>
+</html>
