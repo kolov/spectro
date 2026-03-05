@@ -9,7 +9,7 @@ Adjustable parameters:
 - Grating density (300-1800 lines/mm)
 - Grating-to-sensor distance
 - Wavelength range
-- Incidence angle
+- Grating tilt
 - Diffraction order
 
 Shows box dimensions, component positions, light paths, and sensor span for building.
