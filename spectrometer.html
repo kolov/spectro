@@ -658,38 +658,34 @@ function draw() {
   }
 
   // ---- 0-ORDER (undiffracted) RAY ----
-  // 0-order passes straight through — camera sees the slit directly.
-  // Check if slit is within FOV by angle from optical center.
-  const toSlitX = slitX_mm - optCenterX;
-  const toSlitY = slitY_mm - optCenterY;
-  const lookX = -cdx, lookY = -cdy; // camera looks toward grating
-  const slitDot = toSlitX * lookX + toSlitY * lookY;
-  const slitCross = toSlitX * lookY - toSlitY * lookX;
-  const slitAngleFromAxis = Math.abs(Math.atan2(slitCross, slitDot));
-  const zeroOrderOnSensor = slitAngleFromAxis <= fovHalfAngle;
+  // 0-order passes straight through the grating horizontally.
+  // Check if its image lands on the camera sensor.
+  const zeroOrderSensorPos = p.focalLength * Math.tan(0 - centralBeta);
+  const zeroOrderOnSensor = Math.abs(zeroOrderSensorPos) <= halfSensor;
 
-  // Draw 0-order ray (dashed white line through grating continuing horizontally)
-  const zeroRayEndX = boxMaxX;
-  const zeroRayEndY = 0; // horizontal
-  const [zrEx, zrEy] = toScr(zeroRayEndX, zeroRayEndY);
-  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  // Draw full 0-order ray: slit → grating → continues horizontally → sensor plane
+  const zeroColor = zeroOrderOnSensor ? 'rgba(255,100,100,0.6)' : 'rgba(255,255,255,0.25)';
+  // Slit to grating
+  ctx.strokeStyle = zeroColor;
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(grSx, grSy);
-  ctx.lineTo(zrEx, zrEy);
+  ctx.moveTo(slSx, slSy);
+  ctx.lineTo(grSx, grSy);
   ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Mark where 0-order hits sensor plane
-  // 0-order ray: origin + t*(cos(α), sin(α)) intersects sensor plane
-  // 0-order goes horizontal (angle 0): cos(0)=1, sin(0)=0
+  // Grating onward (horizontal)
   const zrdx = 1, zrdy = 0;
   const zdet = zrdx * stY - zrdy * stX;
   if (Math.abs(zdet) > 1e-10) {
     const zt = (scX_mm * stY - scY_mm * stX) / zdet;
     const zHitX = zrdx * zt, zHitY = zrdy * zt;
     const [zhx, zhy] = toScr(zHitX, zHitY);
+    ctx.beginPath();
+    ctx.moveTo(grSx, grSy);
+    ctx.lineTo(zhx, zhy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Mark hit point on sensor plane
     ctx.fillStyle = zeroOrderOnSensor ? '#ff4444' : 'rgba(255,255,255,0.3)';
     ctx.beginPath();
     ctx.arc(zhx, zhy, 5, 0, Math.PI * 2);
@@ -698,6 +694,8 @@ function draw() {
     ctx.font = '10px Arial';
     ctx.textAlign = 'left';
     ctx.fillText(`0-order${zeroOrderOnSensor ? ' (IN FRAME!)' : ''}`, zhx + 8, zhy + 4);
+  } else {
+    ctx.setLineDash([]);
   }
 
   // ---- LENS CYLINDER (top-down = rectangle) ----
